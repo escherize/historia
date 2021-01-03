@@ -5,10 +5,17 @@
             [defrag.core :as defrag])
   (:gen-class))
 
-(def ^:dynamic *db-uri* "jdbc:sqlite::memory:")
+(def *db-uri (atom {:connection-uri "jdbc:sqlite:.historia.db"}))
 
-(defn on-start []
-  (let [spec {:connection-uri "jdbc:sqlite::memory:"}
+(defn set-db!
+  "Call with something jdbc can use as a db spec before using defn-historia, or calling `mount/start`.
+
+  For reference: https://github.com/clojure/java.jdbc#example-usage "
+  [uri]
+  (reset! *db-uri uri))
+
+(defn ^:private on-start []
+  (let [spec @*db-uri
         conn (jdbc/get-connection spec)]
     (assoc spec :connection conn)))
 
@@ -17,13 +24,14 @@
   :start (on-start)
   :stop (do (-> db :connection .close) nil))
 
-(defn init-db []
+(defn ^:private init-db []
   (jdbc/execute!
    db
    "create table
- if not exists historia_calls
+ if not exists calls
 (id INTEGER PRIMARY KEY,
  fn_name TEXT,
+ full_name TEXT,
  arguments TEXT,
  argument_values TEXT,
  body TEXT,
@@ -31,90 +39,130 @@
  start_time INTEGER,
  output TEXT)"))
 
-(defn clear-db! []
-  (mount/start #'historia.core/db)
-  (jdbc/execute! db "drop table historia_calls"))
+(defn clear-db! [yes]
+  (if (= :yes yes)
+    (do
+      (mount/start #'historia.core/db)
+      (jdbc/execute! db "drop table calls"))
+    (println "Call this with :yes if you want to clear it.")))
 
-(defn insert!
+(defn ^:private insert-start!
   [db fn-name
    args arg-values
-   body output
-   start-time end-time]
+   body start-time]
   (mount/start #'historia.core/db)
   (init-db)
   (let [d {:start_time start-time
-           :end_time end-time
            :fn_name fn-name
+           :full_name (str *ns* "/" fn-name)
            :arguments (pr-str args)
            :argument_values (pr-str arg-values)
            :body (pr-str body)
-           :output (pr-str output)}]
-    ;;(println (pr-str d))
-    (jdbc/insert! db :historia_calls d)))
+           ;; fill in unfilled values:
+           :output ":historia/unfilled"
+           :end_time 0}]
+    (jdbc/insert! db :calls d)))
+
+(defn ^:private insert-end! [db id output end-time]
+  (println "updatting db at id: " id)
+  (jdbc/update! db
+                :calls
+                {:output output :end_time end-time}
+                ["id = ?" id]))
 
 (defn def-history [name args body]
   `((let [start-time# (System/currentTimeMillis)
+          _# (insert-start! db ~name
+                            '~args ~args
+                            '~body start-time#)
+          id# (first (vals (first _#)))
           out# (do ~@body)
           end-time# (System/currentTimeMillis)]
-      (insert! db ~name
-               '~args ~args
-               '~body out#
-               start-time# end-time#)
+      (insert-end! db id# out# end-time#)
       out#)))
 
 (defrag/defrag! defn-historia def-history)
 
-(defn-historia ink [x] (+ 10 x))
+;; Reading back the history:
 
-(defn format-on-read [row]
-  (-> row
-      (update :arguments read-string)
-      (update :argument_values read-string)
-      (update :output read-string)
-      (update :body read-string)))
+(defn format-on-read [row] (let [r (fnil read-string "nil")]
+                             (-> row
+                                 (update :arguments r)
+                                 (update :argument_values r)
+                                 (update :output r)
+                                 (update :body r))))
 
-(defn one [fn-name]
-  (->
-   (jdbc/query db ["select * from historia_calls
-                    where fn_name = ?
-                    order by start_time desc
-                    limit 1" fn-name])
-   first
-   format-on-read))
+(defn one [fn-name] (some->
+                     (jdbc/query db ["select * from calls
+                                      where fn_name = ?
+                                      order by start_time desc
+                                      limit 1" fn-name])
+                     first
+                     format-on-read))
 
-(defn many [fn-name & [limit]]
-  (let [limit (or limit 10)]
-    (->>
-     (jdbc/query db ["select * from historia_calls
-                      where fn_name = ?
-                      order by start_time desc
-                      limit ?" fn-name limit])
-     (mapv format-on-read))))
+(defn full [full-name] (some->
+                        (jdbc/query db ["select * from calls
+                                         where full_name = ?
+                                         order by start_time desc
+                                         limit 1" full-name])
+                        first
+                        format-on-read))
 
-(defn-historia ink [x]
-  (let [k (let [k (let [k (* 10 x)] k)] k)] k))
+(defn many [fn-name & [limit]] (let [limit (or limit 10)]
+                                 (some->>
+                                  (jdbc/query db ["select * from calls
+                                                   where fn_name = ?
+                                                   order by start_time desc
+                                                   limit ?" fn-name limit])
+                                  (mapv format-on-read))))
 
-(ink 1)
-(one "ink")
+(defn many-full [full-name & [limit]] (let [limit (or limit 10)]
+                                        (some->>
+                                         (jdbc/query db ["select * from calls
+                                                          where full_name = ?
+                                                          order by start_time desc
+                                                          limit ?" full-name limit])
+                                         (mapv format-on-read))))
 
-;;=> {:id 434,
-;;    :fn_name "ink",
-;;    :arguments [x],
-;;    :argument_values [1],
-;;    :body [(let [k (let [k (let [k (* 10 x)] k)] k)] k)],
-;;    :end_time 1609624096662,
-;;    :start_time 1609624096662,
-;;    :output 10}
+(comment
 
-(count (many "ink"))
-;;=> 10
+  ;; usage:
 
-(defn-historia fakt [x]
-  (if (or (> 0.1 (rand)) (<= x 1))
-    1
-    (+ (fakt (dec x)) x)))
+  (defn-historia ^:private
+    ink
+    ([] (rand))
+    ([x] (* 10 x)))
 
-(time
- (do
-   (fakt 20)
-   (mapv (juxt :start_time :argument_values) (many "fakt" 20))))
+  (ink "2")
+  (=
+   (one "ink")
+   (one-full "historia.core/ink"))
+  ;;=> true
+
+  (one "ink")
+
+  ;;=>  {:fn_name "ink"
+  ;;     :arguments [x]
+  ;;     :start_time 1609713723393
+  ;;     :argument_values [2]
+  ;;     :output 20
+  ;;     :end_time 1609713723393
+  ;;     :id 2
+  ;;     :full_name "historia.core/ink"
+  ;;     :body [(* 10 x)]}
+
+  (defn-historia fakt [x]
+    (if (<= x 1)
+      1
+      (+ (fakt (dec x)) x)))
+
+  (fakt 20)
+
+  (fakt "??")
+
+  (mapv (juxt :argument_values :output) (many "fakt" 3))
+  ;;=> [[["??"] :historia/unfilled]
+  ;;    [[1]    1]
+  ;;    [[2]    3]]
+
+  )

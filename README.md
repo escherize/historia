@@ -4,7 +4,7 @@ A defn macro to observe and remember what args, body, output and more have been 
 
 ## Installation
 
-[escherize/historia "0.1.0"]
+[escherize/historia "0.1.1"]
 
 ## Usage
 
