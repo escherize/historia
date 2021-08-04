@@ -14,7 +14,7 @@
   [uri]
   (reset! *db-uri uri))
 
-(defn ^:private on-start []
+(defn on-start []
   (let [spec @*db-uri
         conn (jdbc/get-connection spec)]
     (assoc spec :connection conn)))
@@ -24,7 +24,7 @@
   :start (on-start)
   :stop (do (-> db :connection .close) nil))
 
-(defn ^:private init-db []
+(defn init-db []
   (jdbc/execute!
    db
    "create table
@@ -46,7 +46,7 @@
       (jdbc/execute! db "drop table calls"))
     (println "Call this with :yes if you want to clear it.")))
 
-(defn ^:private insert-start!
+(defn insert-start!
   [db fn-name
    args arg-values
    body start-time]
@@ -63,7 +63,7 @@
            :end_time 0}]
     (jdbc/insert! db :calls d)))
 
-(defn ^:private insert-end! [db id output end-time]
+(defn insert-end! [db id output end-time]
   (println "updatting db at id: " id)
   (jdbc/update! db
                 :calls
